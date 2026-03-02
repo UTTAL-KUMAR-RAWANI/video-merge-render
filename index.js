@@ -6,86 +6,81 @@ const path = require("path");
 
 const app = express();
 
-// IMPORTANT: Tell fluent-ffmpeg where ffmpeg is installed (Docker path)
-ffmpeg.setFfmpegPath("/usr/bin/ffmpeg");
-
-// Increase body limits (important for video uploads)
+// Body limits
 app.use(express.json({ limit: "100mb" }));
 app.use(express.urlencoded({ limit: "100mb", extended: true }));
 
-// Ensure uploads folder exists
+// Create uploads folder if not exists
 if (!fs.existsSync("uploads")) {
   fs.mkdirSync("uploads");
 }
 
-// Multer config
+// Multer setup
 const upload = multer({
   dest: "uploads/",
-  limits: { fileSize: 100 * 1024 * 1024 } // 100MB limit
+  limits: { fileSize: 100 * 1024 * 1024 }
 });
+
+
+// ======================================================
+// 1️⃣ MERGE ROUTE (Scene Creation)
+// video + voice + background music + sfx
+// ======================================================
 
 app.post("/merge", upload.any(), async (req, res) => {
 
   try {
 
-    if (!req.files || req.files.length < 2) {
-      return res.status(400).send("Video and audio files are required");
-    }
-
-    // Find files by field name
     const videoFile = req.files.find(f => f.fieldname === "video");
-    const audioFile = req.files.find(f => f.fieldname === "audio");
+    const voiceFile = req.files.find(f => f.fieldname === "audio");
 
-    if (!videoFile || !audioFile) {
+    if (!videoFile || !voiceFile) {
       return res.status(400).send("Fields must be named 'video' and 'audio'");
     }
 
-    const outputPath = path.join("uploads", `output-${Date.now()}.mp4`);
+    const outputPath = path.join("uploads", `scene-${Date.now()}.mp4`);
 
-ffmpeg()
-  .input(videoFile.path)            // 0: video
-  .input(voiceFile.path)            // 1: voice
-  .input("assets/background.mp3")   // 2: music
-  .input("assets/whoosh.mp3")       // 3: sfx
+    ffmpeg()
+      .input(videoFile.path)              // 0 - video
+      .input(voiceFile.path)              // 1 - voice
+      .input("background.mp3")           // 2 - music
+      .input("whoosh.mp3")               // 3 - sfx
 
-  .complexFilter([
-    // Lower music volume
-    "[2:a]volume=0.2[music];",
+      .complexFilter([
+        "[2:a]volume=0.2[music];",
+        "[3:a]volume=0.6[sfx];",
+        "[1:a][music][sfx]amix=inputs=3:dropout_transition=0[aout]"
+      ])
 
-    // Lower sfx slightly
-    "[3:a]volume=0.5[sfx];",
+      .outputOptions([
+        "-map 0:v",
+        "-map [aout]",
+        "-c:v copy",
+        "-c:a aac",
+        "-shortest"
+      ])
 
-    // Mix voice + music + sfx
-    "[1:a][music][sfx]amix=inputs=3:dropout_transition=0[aout]"
-  ])
+      .save(outputPath)
 
-  .outputOptions([
-    "-map 0:v",
-    "-map [aout]",
-    "-c:v copy",
-    "-c:a aac",
-    "-shortest"
-  ])
-  .save(outputPath)
-  .on("end", () => {
+      .on("end", () => {
 
-       res.setHeader("Content-Type", "video/mp4");
-res.setHeader("Content-Disposition", "attachment; filename=merged.mp4");
+        res.setHeader("Content-Type", "video/mp4");
 
-const fileStream = fs.createReadStream(outputPath);
-fileStream.pipe(res);
+        const stream = fs.createReadStream(outputPath);
+        stream.pipe(res);
 
-fileStream.on("close", () => {
-  try {
-    fs.unlinkSync(videoFile.path);
-    fs.unlinkSync(audioFile.path);
-    fs.unlinkSync(outputPath);
-  } catch (err) {
-    console.error("Cleanup error:", err);
-  }
-});
+        stream.on("close", () => {
+          try {
+            fs.unlinkSync(videoFile.path);
+            fs.unlinkSync(voiceFile.path);
+            fs.unlinkSync(outputPath);
+          } catch (err) {
+            console.error("Cleanup error:", err);
+          }
+        });
 
       })
+
       .on("error", (err) => {
         console.error("FFmpeg error:", err);
         res.status(500).send("Merge failed");
@@ -98,12 +93,97 @@ fileStream.on("close", () => {
 
 });
 
-// Health check route (optional but useful)
+
+// ======================================================
+// 2️⃣ CONCAT ROUTE (Cinematic Final Merge)
+// Adds slide transition between clips
+// ======================================================
+
+app.post("/concat", upload.array("videos"), async (req, res) => {
+
+  try {
+
+    if (!req.files || req.files.length < 2) {
+      return res.status(400).send("At least 2 videos required");
+    }
+
+    const files = req.files;
+    const outputPath = path.join("uploads", `final-${Date.now()}.mp4`);
+
+    const command = ffmpeg();
+
+    files.forEach(file => {
+      command.input(file.path);
+    });
+
+    // Build xfade transitions
+    const filterParts = [];
+    files.forEach((file, index) => {
+      filterParts.push(`[${index}:v:0]setpts=PTS-STARTPTS[v${index}]`);
+    });
+
+    let lastVideo = "v0";
+    let offset = 4; // adjust if scenes longer
+
+    for (let i = 1; i < files.length; i++) {
+      filterParts.push(
+        `[${lastVideo}][v${i}]xfade=transition=slideleft:duration=0.4:offset=${offset}[v${i}out]`
+      );
+      lastVideo = `v${i}out`;
+      offset += 4;
+    }
+
+    command
+      .complexFilter(filterParts)
+      .outputOptions([
+        `-map [${lastVideo}]`,
+        "-c:v libx264",
+        "-c:a aac"
+      ])
+      .save(outputPath)
+
+      .on("end", () => {
+
+        res.setHeader("Content-Type", "video/mp4");
+
+        const stream = fs.createReadStream(outputPath);
+        stream.pipe(res);
+
+        stream.on("close", () => {
+          try {
+            files.forEach(f => fs.unlinkSync(f.path));
+            fs.unlinkSync(outputPath);
+          } catch (err) {
+            console.error("Cleanup error:", err);
+          }
+        });
+
+      })
+
+      .on("error", (err) => {
+        console.error("Concat error:", err);
+        res.status(500).send("Concat failed");
+      });
+
+  } catch (err) {
+    console.error("Server error:", err);
+    res.status(500).send("Server error");
+  }
+
+});
+
+
+// ======================================================
+// Health Check
+// ======================================================
+
 app.get("/", (req, res) => {
   res.send("Video Merge API is running");
 });
 
-const PORT = process.env.PORT || 3000;
+
+const PORT = process.env.PORT || 10000;
+
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
