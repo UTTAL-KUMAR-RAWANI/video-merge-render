@@ -42,16 +42,29 @@ app.post("/merge", upload.any(), async (req, res) => {
 
     const outputPath = path.join("uploads", `output-${Date.now()}.mp4`);
 
- ffmpeg()
-  .input(videoFile.path)
-  .input(audioFile.path)
+ffmpeg()
+  .input(videoFile.path)            // 0: video
+  .input(voiceFile.path)            // 1: voice
+  .input("assets/background.mp3")   // 2: music
+  .input("assets/whoosh.mp3")       // 3: sfx
+
+  .complexFilter([
+    // Lower music volume
+    "[2:a]volume=0.2[music];",
+
+    // Lower sfx slightly
+    "[3:a]volume=0.5[sfx];",
+
+    // Mix voice + music + sfx
+    "[1:a][music][sfx]amix=inputs=3:dropout_transition=0[aout]"
+  ])
+
   .outputOptions([
-    "-map 0:v:0",
-    "-map 1:a:0",
+    "-map 0:v",
+    "-map [aout]",
     "-c:v copy",
     "-c:a aac",
-    "-shortest",
-    "-preset ultrafast"
+    "-shortest"
   ])
   .save(outputPath)
   .on("end", () => {
