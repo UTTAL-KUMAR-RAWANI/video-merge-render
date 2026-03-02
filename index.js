@@ -56,16 +56,21 @@ app.post("/merge", upload.any(), async (req, res) => {
   .save(outputPath)
   .on("end", () => {
 
-        res.download(outputPath, () => {
-          // Cleanup
-          try {
-            fs.unlinkSync(videoFile.path);
-            fs.unlinkSync(audioFile.path);
-            fs.unlinkSync(outputPath);
-          } catch (cleanupErr) {
-            console.error("Cleanup error:", cleanupErr);
-          }
-        });
+       res.setHeader("Content-Type", "video/mp4");
+res.setHeader("Content-Disposition", "attachment; filename=merged.mp4");
+
+const fileStream = fs.createReadStream(outputPath);
+fileStream.pipe(res);
+
+fileStream.on("close", () => {
+  try {
+    fs.unlinkSync(videoFile.path);
+    fs.unlinkSync(audioFile.path);
+    fs.unlinkSync(outputPath);
+  } catch (err) {
+    console.error("Cleanup error:", err);
+  }
+});
 
       })
       .on("error", (err) => {
